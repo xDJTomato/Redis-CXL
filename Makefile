@@ -9,9 +9,10 @@ ifeq ($(uname_S),SunOS)
   CCLINK?= -ldl -lnsl -lsocket -lm -lpthread
 else
   CFLAGS?= -std=c99 -pedantic $(OPTIMIZATION) -Wall -W $(ARCH) $(PROF)
-  CCLINK?= -lm -pthread
+  # 添加libnuma链接，注意链接顺序：依赖的库放在后面
+  CCLINK?= -pthread -lnuma -lm
 endif
-CCOPT= $(CFLAGS) $(CCLINK) $(ARCH) $(PROF)
+CCOPT= $(CFLAGS) $(ARCH) $(PROF)
 DEBUG?= -g -rdynamic -ggdb 
 
 OBJ = adlist.o ae.o anet.o dict.o redis.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o
@@ -19,12 +20,16 @@ BENCHOBJ = ae.o anet.o redis-benchmark.o sds.o adlist.o zmalloc.o
 CLIOBJ = anet.o sds.o adlist.o redis-cli.o zmalloc.o
 CHECKDUMPOBJ = redis-check-dump.o lzf_c.o lzf_d.o
 
+# 添加测试程序
+TESTNUMAOBJ = test-numa.o zmalloc.o
+TESTNUMPRGNAME = test-numa
+
 PRGNAME = redis-server
 BENCHPRGNAME = redis-benchmark
 CLIPRGNAME = redis-cli
 CHECKDUMPPRGNAME = redis-check-dump
 
-all: redis-server redis-benchmark redis-cli redis-check-dump
+all: redis-server redis-benchmark redis-cli redis-check-dump test-numa
 
 # Deps (use make dep to generate this)
 adlist.o: adlist.c adlist.h zmalloc.h
@@ -45,9 +50,10 @@ redis.o: redis.c fmacros.h config.h redis.h ae.h sds.h anet.h dict.h \
 sds.o: sds.c sds.h zmalloc.h
 zipmap.o: zipmap.c zmalloc.h
 zmalloc.o: zmalloc.c config.h
+test-numa.o: test-numa.c zmalloc.h
 
 redis-server: $(OBJ)
-	$(CC) -o $(PRGNAME) $(CCOPT) $(DEBUG) $(OBJ)
+	$(CC) -o $(PRGNAME) $(CCOPT) $(DEBUG) $(OBJ) $(CCLINK)
 	@echo ""
 	@echo "Hint: To run the test-redis.tcl script is a good idea."
 	@echo "Launch the redis server with ./redis-server, then in another"
@@ -55,19 +61,22 @@ redis-server: $(OBJ)
 	@echo ""
 
 redis-benchmark: $(BENCHOBJ)
-	$(CC) -o $(BENCHPRGNAME) $(CCOPT) $(DEBUG) $(BENCHOBJ)
+	$(CC) -o $(BENCHPRGNAME) $(CCOPT) $(DEBUG) $(BENCHOBJ) $(CCLINK)
 
 redis-cli: $(CLIOBJ)
-	$(CC) -o $(CLIPRGNAME) $(CCOPT) $(DEBUG) $(CLIOBJ)
+	$(CC) -o $(CLIPRGNAME) $(CCOPT) $(DEBUG) $(CLIOBJ) $(CCLINK)
 
 redis-check-dump: $(CHECKDUMPOBJ)
-	$(CC) -o $(CHECKDUMPPRGNAME) $(CCOPT) $(DEBUG) $(CHECKDUMPOBJ)
+	$(CC) -o $(CHECKDUMPPRGNAME) $(CCOPT) $(DEBUG) $(CHECKDUMPOBJ) $(CCLINK)
+
+test-numa: $(TESTNUMAOBJ)
+	$(CC) -o $(TESTNUMPRGNAME) $(CCOPT) $(DEBUG) $(TESTNUMAOBJ) $(CCLINK)
 
 .c.o:
 	$(CC) -c $(CFLAGS) $(DEBUG) $(COMPILE_TIME) $<
 
 clean:
-	rm -rf $(PRGNAME) $(BENCHPRGNAME) $(CLIPRGNAME) $(CHECKDUMPPRGNAME) *.o *.gcda *.gcno *.gcov
+	rm -rf $(PRGNAME) $(BENCHPRGNAME) $(CLIPRGNAME) $(CHECKDUMPPRGNAME) $(TESTNUMPRGNAME) *.o *.gcda *.gcno *.gcov
 
 dep:
 	$(CC) -MM *.c

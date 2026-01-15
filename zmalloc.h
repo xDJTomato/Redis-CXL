@@ -20,7 +20,7 @@
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
  * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
  * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * CONSEPTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
  * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
  * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
@@ -31,11 +31,19 @@
 #ifndef _ZMALLOC_H
 #define _ZMALLOC_H
 
+#include <stddef.h>
+
 void *zmalloc(size_t size);
 void *zrealloc(void *ptr, size_t size);
 void zfree(void *ptr);
 char *zstrdup(const char *s);
 size_t zmalloc_used_memory(void);
 void zmalloc_enable_thread_safeness(void);
+
+// libnuma相关的扩展函数
+void zmalloc_set_numa_node(int node);  // 设置默认的NUMA节点
+int zmalloc_get_current_numa_node(void);  // 获取当前线程的NUMA节点
+void *zmalloc_on_node(size_t size, int node);  // 在指定NUMA节点分配内存
+void *zrealloc_on_node(void *ptr, size_t size, int node);  // 在指定NUMA节点重新分配
 
 #endif /* _ZMALLOC_H */
