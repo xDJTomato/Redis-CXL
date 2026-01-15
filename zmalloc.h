@@ -46,4 +46,15 @@ int zmalloc_get_current_numa_node(void);  // 获取当前线程的NUMA节点
 void *zmalloc_on_node(size_t size, int node);  // 在指定NUMA节点分配内存
 void *zrealloc_on_node(void *ptr, size_t size, int node);  // 在指定NUMA节点重新分配
 
+// NUMA策略相关函数
+typedef enum {
+    NUMA_POLICY_DEFAULT = 0,      // 默认策略
+    NUMA_POLICY_DISTANCE_FIRST,   // 距离优先策略
+    NUMA_POLICY_ROUND_ROBIN,      // 轮询策略
+    NUMA_POLICY_BALANCED          // 负载均衡策略
+} numa_policy_t;
+
+void zmalloc_set_numa_policy(numa_policy_t policy);  // 设置NUMA分配策略
+void zmalloc_cleanup_numa(void);  // 清理NUMA资源
+
 #endif /* _ZMALLOC_H */
