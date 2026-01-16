@@ -29,6 +29,9 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+// ============================================================================
+// 头文件包含
+// ============================================================================
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,11 +42,18 @@
 #include <limits.h>
 #include "config.h"
 
+// ============================================================================
+// 宏定义和常量
+// ============================================================================
 #if defined(__sun)
-#define PREFIX_SIZE sizeof(long long)
+    #define PREFIX_SIZE sizeof(long long)
 #else
-#define PREFIX_SIZE sizeof(size_t)
+    #define PREFIX_SIZE sizeof(size_t)
 #endif
+
+// ============================================================================
+// 全局变量声明
+// ============================================================================
 
 // 内存分配统计
 static size_t used_memory = 0;
@@ -55,10 +65,18 @@ static int numa_support_available = 0;   // libnuma是否可用
 static int default_numa_node = -1;       // 默认NUMA节点(-1表示自动选择)
 static int numa_initialized = 0;         // NUMA库是否已初始化
 
+// NUMA策略配置
+static int *sorted_nodes_by_distance = NULL;  // 按距离排序的节点数组
+static int num_available_nodes = 0;           // 可用节点数量
+
+// ============================================================================
+// 宏定义
+// ============================================================================
+
 // 内存操作宏定义（线程安全）
 #define increment_used_memory(_n) do { \
     if (zmalloc_thread_safe) { \
-        pthread_mutex_lock(&used_memory_mutex);  \
+        pthread_mutex_lock(&used_memory_mutex); \
         used_memory += _n; \
         pthread_mutex_unlock(&used_memory_mutex); \
     } else { \
@@ -68,13 +86,38 @@ static int numa_initialized = 0;         // NUMA库是否已初始化
 
 #define decrement_used_memory(_n) do { \
     if (zmalloc_thread_safe) { \
-        pthread_mutex_lock(&used_memory_mutex);  \
+        pthread_mutex_lock(&used_memory_mutex); \
         used_memory -= _n; \
         pthread_mutex_unlock(&used_memory_mutex); \
     } else { \
         used_memory -= _n; \
     } \
 } while(0)
+
+// ============================================================================
+// 枚举定义
+// ============================================================================
+
+// NUMA分配策略枚举
+typedef enum {
+    NUMA_POLICY_DEFAULT = 0,      // 默认策略（当前逻辑）
+    NUMA_POLICY_DISTANCE_FIRST,   // 距离优先策略
+    NUMA_POLICY_ROUND_ROBIN,      // 轮询策略（预留）
+    NUMA_POLICY_BALANCED          // 负载均衡策略（预留）
+} numa_policy_t;
+
+static numa_policy_t current_numa_policy = NUMA_POLICY_DISTANCE_FIRST;
+
+// ============================================================================
+// 函数声明
+// ============================================================================
+static void *numa_alloc_distance_first(size_t total_size);
+static void init_sorted_nodes(void);
+static int compare_nodes_by_distance(const void *a, const void *b);
+
+// ============================================================================
+// NUMA节点管理函数
+// ============================================================================
 
 /**
  * 寻找距离当前线程最近的NUMA节点
@@ -119,22 +162,100 @@ static int find_nearest_numa_node(void) {
     return nearest_node;
 }
 
-// NUMA分配策略枚举
-typedef enum {
-    NUMA_POLICY_DEFAULT = 0,      // 默认策略（当前逻辑）
-    NUMA_POLICY_DISTANCE_FIRST,   // 距离优先策略
-    NUMA_POLICY_ROUND_ROBIN,      // 轮询策略（预留）
-    NUMA_POLICY_BALANCED          // 负载均衡策略（预留）
-} numa_policy_t;
+/**
+ * 比较函数：用于节点距离排序
+ */
+static int compare_nodes_by_distance(const void *a, const void *b) {
+    int node_a = *(int*)a;
+    int node_b = *(int*)b;
+    
+    // 获取当前CPU编号
+    int current_cpu = sched_getcpu();
+    if (current_cpu < 0) {
+        // 如果无法获取当前CPU，使用节点0作为参考
+        return numa_distance(0, node_a) - numa_distance(0, node_b);
+    }
+    
+    // 获取当前CPU所属的节点
+    int current_node = numa_node_of_cpu(current_cpu);
+    if (current_node >= 0) {
+        return numa_distance(current_node, node_a) - numa_distance(current_node, node_b);
+    }
+    
+    // 回退到使用节点0作为参考
+    return numa_distance(0, node_a) - numa_distance(0, node_b);
+}
 
-// NUMA策略配置
-static numa_policy_t current_numa_policy = NUMA_POLICY_DISTANCE_FIRST;
-static int *sorted_nodes_by_distance = NULL;  // 按距离排序的节点数组
-static int num_available_nodes = 0;           // 可用节点数量
+/**
+ * 初始化NUMA节点排序（按距离）
+ */
+static void init_sorted_nodes(void) {
+    if (sorted_nodes_by_distance != NULL) {
+        free(sorted_nodes_by_distance);
+    }
+    
+    int max_node = numa_max_node();
+    if (max_node < 0) {
+        num_available_nodes = 0;
+        sorted_nodes_by_distance = NULL;
+        return;
+    }
+    
+    // 收集所有可用节点
+    int *available_nodes = malloc((max_node + 1) * sizeof(int));
+    num_available_nodes = 0;
+    
+    for (int i = 0; i <= max_node; i++) {
+        if (numa_bitmask_isbitset(numa_all_nodes_ptr, i)) {
+            available_nodes[num_available_nodes++] = i;
+        }
+    }
+    
+    if (num_available_nodes == 0) {
+        free(available_nodes);
+        sorted_nodes_by_distance = NULL;
+        return;
+    }
+    
+    // 按距离排序
+    sorted_nodes_by_distance = available_nodes;
+    qsort(sorted_nodes_by_distance, num_available_nodes, sizeof(int), compare_nodes_by_distance);
+    
+    printf("zmalloc: NUMA nodes sorted by distance: ");
+    for (int i = 0; i < num_available_nodes; i++) {
+        printf("%d ", sorted_nodes_by_distance[i]);
+    }
+    printf("\n");
+}
 
-// 函数声明
-static void *numa_alloc_distance_first(size_t total_size);
-static void init_sorted_nodes(void);
+/**
+ * 距离优先分配策略：按距离顺序尝试分配
+ */
+static void *numa_alloc_distance_first(size_t total_size) {
+    if (sorted_nodes_by_distance == NULL || num_available_nodes == 0) {
+        return NULL;
+    }
+    
+    // 按距离顺序尝试每个节点
+    for (int i = 0; i < num_available_nodes; i++) {
+        int node = sorted_nodes_by_distance[i];
+        void *ptr = numa_alloc_onnode(total_size, node);
+        if (ptr != NULL) {
+            printf("zmalloc: Allocated %zu bytes on node %d (distance priority: %d)\n", 
+                   total_size, node, i);
+            return ptr;
+        } else {
+            printf("zmalloc: Failed to allocate %zu bytes on node %d, trying next node\n", 
+                   total_size, node);
+        }
+    }
+    
+    return NULL;  // 所有节点都分配失败
+}
+
+// ============================================================================
+// NUMA初始化函数
+// ============================================================================
 
 /**
  * 初始化NUMA支持
@@ -171,24 +292,16 @@ static void zmalloc_numa_init(void) {
     numa_initialized = 1;
 }
 
-/**
- * 获取当前线程的NUMA节点
- */
-int zmalloc_get_current_numa_node(void) {
-    if (!numa_initialized) zmalloc_numa_init();
-    
-    if (numa_support_available == 0) {
-        // 返回找到的最近节点，而不是numa_preferred()
-        return default_numa_node;
-    }
-    return -1;  // NUMA不可用
-}
+// ============================================================================
+// 内存分配核心函数
+// ============================================================================
 
 /**
  * 内存不足处理函数
  */
 static void zmalloc_oom(size_t size, size_t total_size) {
-    fprintf(stderr, "zmalloc: Out of memory trying to allocate %zu bytes (requested: %zu bytes)\n", total_size, size);
+    fprintf(stderr, "zmalloc: Out of memory trying to allocate %zu bytes (requested: %zu bytes)\n", 
+            total_size, size);
     fflush(stderr);
     abort();
 }
@@ -278,6 +391,10 @@ static void zfree_internal(void *ptr) {
     }
 #endif
 }
+
+// ============================================================================
+// 公共API函数
+// ============================================================================
 
 /**
  * 标准内存分配函数
@@ -393,6 +510,10 @@ char *zstrdup(const char *s) {
     return p;
 }
 
+// ============================================================================
+// 内存管理辅助函数
+// ============================================================================
+
 /**
  * 获取已使用内存总量
  */
@@ -412,6 +533,19 @@ void zmalloc_enable_thread_safeness(void) {
 }
 
 /**
+ * 获取当前线程的NUMA节点
+ */
+int zmalloc_get_current_numa_node(void) {
+    if (!numa_initialized) zmalloc_numa_init();
+    
+    if (numa_support_available == 0) {
+        // 返回找到的最近节点，而不是numa_preferred()
+        return default_numa_node;
+    }
+    return -1;  // NUMA不可用
+}
+
+/**
  * 设置默认NUMA节点
  */
 void zmalloc_set_numa_node(int node) {
@@ -423,97 +557,6 @@ void zmalloc_set_numa_node(int node) {
     } else {
         fprintf(stderr, "zmalloc: Invalid NUMA node %d\n", node);
     }
-}
-
-/**
- * 比较函数：用于节点距离排序
- */
-static int compare_nodes_by_distance(const void *a, const void *b) {
-    int node_a = *(int*)a;
-    int node_b = *(int*)b;
-    
-    // 获取当前CPU编号
-    int current_cpu = sched_getcpu();
-    if (current_cpu < 0) {
-        // 如果无法获取当前CPU，使用节点0作为参考
-        return numa_distance(0, node_a) - numa_distance(0, node_b);
-    }
-    
-    // 获取当前CPU所属的节点
-    int current_node = numa_node_of_cpu(current_cpu);
-    if (current_node >= 0) {
-        return numa_distance(current_node, node_a) - numa_distance(current_node, node_b);
-    }
-    
-    // 回退到使用节点0作为参考
-    return numa_distance(0, node_a) - numa_distance(0, node_b);
-}
-
-/**
- * 初始化NUMA节点排序（按距离）
- */
-static void init_sorted_nodes(void) {
-    if (sorted_nodes_by_distance != NULL) {
-        free(sorted_nodes_by_distance);
-    }
-    
-    int max_node = numa_max_node();
-    if (max_node < 0) {
-        num_available_nodes = 0;
-        sorted_nodes_by_distance = NULL;
-        return;
-    }
-    
-    // 收集所有可用节点
-    int *available_nodes = malloc((max_node + 1) * sizeof(int));
-    num_available_nodes = 0;
-    
-    for (int i = 0; i <= max_node; i++) {
-        if (numa_bitmask_isbitset(numa_all_nodes_ptr, i)) {
-            available_nodes[num_available_nodes++] = i;
-        }
-    }
-    
-    if (num_available_nodes == 0) {
-        free(available_nodes);
-        sorted_nodes_by_distance = NULL;
-        return;
-    }
-    
-    // 按距离排序
-    sorted_nodes_by_distance = available_nodes;
-    qsort(sorted_nodes_by_distance, num_available_nodes, sizeof(int), compare_nodes_by_distance);
-    
-    printf("zmalloc: NUMA nodes sorted by distance: ");
-    for (int i = 0; i < num_available_nodes; i++) {
-        printf("%d ", sorted_nodes_by_distance[i]);
-    }
-    printf("\n");
-}
-
-/**
- * 距离优先分配策略：按距离顺序尝试分配
- */
-static void *numa_alloc_distance_first(size_t total_size) {
-    if (sorted_nodes_by_distance == NULL || num_available_nodes == 0) {
-        return NULL;
-    }
-    
-    // 按距离顺序尝试每个节点
-    for (int i = 0; i < num_available_nodes; i++) {
-        int node = sorted_nodes_by_distance[i];
-        void *ptr = numa_alloc_onnode(total_size, node);
-        if (ptr != NULL) {
-            printf("zmalloc: Allocated %zu bytes on node %d (distance priority: %d)\n", 
-                   total_size, node, i);
-            return ptr;
-        } else {
-            printf("zmalloc: Failed to allocate %zu bytes on node %d, trying next node\n", 
-                   total_size, node);
-        }
-    }
-    
-    return NULL;  // 所有节点都分配失败
 }
 
 /**
